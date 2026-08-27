@@ -6,8 +6,9 @@ import { Router } from "express";
 import multer from "multer";
 
 import { isAdmin } from "./admin.js";
-import { broadcast, disconnectUser } from "./chat.js";
+import { broadcast, canSendMessage, disconnectUser, MAX_BODY_LENGTH, recordMessageSent, sendToUser } from "./chat.js";
 import {
+  addWarning,
   banUser,
   channelCount,
   channelImagePaths,
@@ -16,14 +17,16 @@ import {
   createUser,
   deleteChannel,
   deleteMessage,
-  dmPartners,
   findUserByUsername,
   getAvatar,
   getMessageImage,
   getUserByUsername,
   insertMessage,
+  isChannelLocked,
   listBannedUsers,
   listChannels,
+  listUsers,
+  listWarnings,
   lockChannel,
   messageChannelId,
   messageImagePath,
@@ -32,15 +35,31 @@ import {
   renameChannel,
   unlockChannel,
   setAvatar,
+  setBio,
   setMessageImage,
+  setUserTimeout,
+  timeoutUntil,
   unbanUser,
   unpinMessage,
+  warningCount,
 } from "./db.js";
+import { getRoles, roleOrder } from "./roles.js";
 import { clearSessionCookie, readSession, setSessionCookie } from "./session.js";
 
 const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,20}$/;
+const MAX_USERNAME_DIGITS = 8;
+
+function isValidUsername(username) {
+  if (typeof username !== "string" || !USERNAME_PATTERN.test(username)) return false;
+  if (/^[0-9]+$/.test(username)) return false;
+  const digitCount = (username.match(/[0-9]/g) ?? []).length;
+  return digitCount <= MAX_USERNAME_DIGITS;
+}
 const CHANNEL_NAME_PATTERN = /^[a-z0-9-]{2,30}$/;
 const MIN_PASSWORD_LENGTH = 8;
+const MAX_BIO_LENGTH = 190;
+const MAX_WARNING_REASON_LENGTH = 300;
+const MAX_TIMEOUT_MINUTES = 10080; // 7 days
 const AVATAR_MIME_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 const avatarsDir = fileURLToPath(new URL("./data/avatars/", import.meta.url));
 const messageImagesDir = fileURLToPath(new URL("./data/message-images/", import.meta.url));
@@ -99,7 +118,7 @@ const router = Router();
 router.post("/signup", async (req, res) => {
   const { username, password, agreedToLegal } = req.body ?? {};
 
-  if (typeof username !== "string" || !USERNAME_PATTERN.test(username)) {
+  if (!isValidUsername(username)) {
     return res.status(400).json({ error: "invalid_username" });
   }
   if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
@@ -162,6 +181,9 @@ router.get("/me", (req, res) => {
     username: session.username,
     isAdmin: isAdmin(session.username),
     avatarUrl: avatarUrlFor(session.uid),
+    roles: getRoles(session.username),
+    roleOrder: roleOrder(),
+    timeoutUntil: timeoutUntil(session.uid),
   });
 });
 
@@ -185,12 +207,46 @@ router.post("/avatar", requireAuth, upload.single("avatar"), (req, res) => {
   res.json({ avatarUrl: avatarUrlFor(req.session.uid) });
 });
 
+router.post("/me/bio", requireAuth, (req, res) => {
+  const { bio } = req.body ?? {};
+  if (typeof bio !== "string" || bio.length > MAX_BIO_LENGTH) {
+    return res.status(400).json({ error: "invalid_bio" });
+  }
+
+  const trimmed = bio.trim();
+  setBio(req.session.uid, trimmed);
+  res.json({ bio: trimmed });
+});
+
+router.get("/users/:username", requireAuth, (req, res) => {
+  const target = getUserByUsername(req.params.username);
+  if (!target) return res.status(404).json({ error: "user_not_found" });
+
+  res.json({
+    username: target.username,
+    isAdmin: isAdmin(target.username),
+    avatarUrl: avatarUrlFor(target.id),
+    bio: target.bio ?? "",
+    joinedAt: target.created_at,
+    roles: getRoles(target.username),
+    banned: isAdmin(req.session.username) ? !!target.banned_at : undefined,
+    warningCount: isAdmin(req.session.username) ? warningCount(target.id) : undefined,
+    timeoutUntil: isAdmin(req.session.username) ? timeoutUntil(target.id) : undefined,
+  });
+});
+
 router.get("/channels", requireAuth, (req, res) => {
   res.json({ channels: listChannels() });
 });
 
-router.get("/dms", requireAuth, (req, res) => {
-  res.json({ partners: dmPartners(req.session.uid) });
+router.get("/members", requireAuth, (req, res) => {
+  const members = listUsers().map((user) => ({
+    username: user.username,
+    avatarUrl: user.avatarMime ? `/chat/avatars/${user.id}?v=${user.avatarUpdatedAt ?? 0}` : null,
+    isAdmin: isAdmin(user.username),
+    roles: getRoles(user.username),
+  }));
+  res.json({ members });
 });
 
 router.post("/admin/channels", requireAdmin, (req, res) => {
@@ -286,14 +342,32 @@ router.post("/admin/channels/:id/lock", requireAdmin, (req, res) => {
   res.json({});
 });
 
-router.post("/admin/channels/:id/image", requireAdmin, uploadImage.single("image"), (req, res) => {
+// Open to any authenticated user, not just admins — still gated by the same
+// channel-lock rule the WS text-message path uses (chat.js), since without
+// it a user excluded from a locked channel could still post via images.
+router.post("/channels/:id/image", requireAuth, uploadImage.single("image"), (req, res) => {
   if (!req.file) return res.status(400).json({ error: "invalid_image" });
 
   const channelId = Number(req.params.id);
+  if (isChannelLocked(channelId) && !isAdmin(req.session.username)) {
+    return res.status(403).json({ error: "channel_locked" });
+  }
+  if (timeoutUntil(req.session.uid)) {
+    return res.status(403).json({ error: "timed_out" });
+  }
+
   const caption = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+  if (caption.length > MAX_BODY_LENGTH) {
+    return res.status(400).json({ error: "too_long" });
+  }
+  if (!canSendMessage(req.session.uid)) {
+    return res.status(429).json({ error: "rate_limited" });
+  }
+
   const ext = AVATAR_MIME_EXT[req.file.mimetype];
 
   const { id, createdAt } = insertMessage({ userId: req.session.uid, channelId, body: caption });
+  recordMessageSent(req.session.uid);
   const path = `${messageImagesDir}${id}.${ext}`;
   writeFileSync(path, req.file.buffer);
   setMessageImage(id, path, req.file.mimetype);
@@ -306,7 +380,7 @@ router.post("/admin/channels/:id/image", requireAdmin, uploadImage.single("image
     userId: req.session.uid,
     username: req.session.username,
     avatarUrl: avatarUrlFor(req.session.uid),
-    isAdmin: true,
+    isAdmin: isAdmin(req.session.username),
     body: caption,
     createdAt,
     pinned: false,
@@ -363,6 +437,47 @@ router.post("/admin/ban", requireAdmin, (req, res) => {
   disconnectUser(target.id);
   broadcast({ type: "userBanned", username: target.username });
   res.json({});
+});
+
+router.post("/admin/warn", requireAdmin, (req, res) => {
+  const { username, reason } = req.body ?? {};
+  const target = typeof username === "string" ? findUserByUsername(username) : null;
+  if (!target) return res.status(404).json({ error: "user_not_found" });
+  if (target.username.toLowerCase() === req.session.username.toLowerCase()) {
+    return res.status(400).json({ error: "cannot_warn_self" });
+  }
+  if (isAdmin(target.username)) {
+    return res.status(400).json({ error: "cannot_warn_admin" });
+  }
+
+  const trimmedReason = typeof reason === "string" ? reason.trim().slice(0, MAX_WARNING_REASON_LENGTH) : "";
+  if (!trimmedReason) return res.status(400).json({ error: "invalid_reason" });
+
+  addWarning(target.id, trimmedReason, req.session.username);
+  sendToUser(target.id, { type: "warned", reason: trimmedReason });
+  res.json({ count: warningCount(target.id) });
+});
+
+router.post("/admin/timeout", requireAdmin, (req, res) => {
+  const { username, minutes } = req.body ?? {};
+  const target = typeof username === "string" ? findUserByUsername(username) : null;
+  if (!target) return res.status(404).json({ error: "user_not_found" });
+  if (target.username.toLowerCase() === req.session.username.toLowerCase()) {
+    return res.status(400).json({ error: "cannot_timeout_self" });
+  }
+  if (isAdmin(target.username)) {
+    return res.status(400).json({ error: "cannot_timeout_admin" });
+  }
+
+  const parsedMinutes = typeof minutes === "number" ? minutes : Number(minutes);
+  if (!Number.isFinite(parsedMinutes) || parsedMinutes <= 0 || parsedMinutes > MAX_TIMEOUT_MINUTES) {
+    return res.status(400).json({ error: "invalid_minutes" });
+  }
+
+  const until = Date.now() + parsedMinutes * 60 * 1000;
+  setUserTimeout(target.id, until);
+  sendToUser(target.id, { type: "timedOut", until });
+  res.json({ until });
 });
 
 router.get("/admin/banned", requireAdmin, (req, res) => {

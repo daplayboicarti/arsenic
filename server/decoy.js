@@ -1,25 +1,3 @@
-import express from "express";
-
-// Serves a fake e-reader app — a close UI/UX clone of a cloud ebook reader
-// (own neutral branding, not Amazon's), with a real short story loaded in
-// it. It doesn't filter by Host, so it's wildcard by construction: whichever
-// domain's traffic gets routed here (by the operator's own reverse proxy
-// config) sees the same cover story. Clicking the book title opens what
-// looks like an ordinary sign-in modal; the right password sets a cookie and
-// reloads in place — it does NOT navigate anywhere. The domain stays the
-// same domain throughout; it's the reverse proxy in front (Caddy) that reads
-// that cookie on the next request and switches which backend it proxies to,
-// decoy or real app, both under the same hostname. The password check itself
-// is entirely client-side and not meant to stop anyone who looks at the page
-// source — it's cover for casual visitors, not access control.
-export function createDecoyApp({ password, cookieName = "reader_session" }) {
-  const app = express();
-  app.use((req, res) => {
-    res.type("html").send(renderDecoyPage({ password, cookieName }));
-  });
-  return app;
-}
-
 const BOOK_TITLE = "Kestrel Point";
 const BOOK_AUTHOR = "Idris Calloway";
 
@@ -85,8 +63,16 @@ const PAGES = [
    <p class="end">The End</p>`,
 ];
 
-function renderDecoyPage({ password, cookieName }) {
-  const pagesJson = JSON.stringify(PAGES);
+// Flattened to one block (<h2>/<p>) per array entry — the client paginates
+// these dynamically based on how much space is actually available, rather
+// than using these 10 chunks as the pages themselves.
+const BLOCKS = PAGES.join("\n")
+  .split(/\n\s*(?=<h2|<p[ >])/)
+  .map((b) => b.trim())
+  .filter(Boolean);
+
+export function renderDecoyPage() {
+  const blocksJson = JSON.stringify(BLOCKS);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -178,18 +164,36 @@ function renderDecoyPage({ password, cookieName }) {
   .zone svg { width: 22px; height: 22px; }
   .page-wrap {
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
     display: flex;
+    flex-direction: column;
+    align-items: center;
     justify-content: center;
+    padding: 24px 12px;
+  }
+  .spread {
+    width: 100%;
+    max-width: 1040px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 56px;
+    overflow: hidden;
   }
   .page {
-    width: 100%;
-    max-width: 640px;
-    padding: 48px 32px 24px;
-    overflow-y: auto;
+    flex: 1;
+    min-width: 0;
+    padding: 40px clamp(20px, 4vw, 40px) 24px;
+    overflow: hidden;
     font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif;
-    font-size: 1.15rem;
+    font-size: clamp(0.95rem, 0.85rem + 0.5vw, 1.15rem);
     line-height: 1.75;
+    overflow-wrap: break-word;
+  }
+  .page-right.hidden {
+    display: none;
   }
   .page h2 {
     font-size: 1.6rem;
@@ -235,19 +239,6 @@ function renderDecoyPage({ password, cookieName }) {
   }
   .modal h2 { margin: 0 0 4px; font-size: 1.3rem; font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif; }
   .modal p.sub { margin: 0 0 20px; color: var(--muted); font-size: 0.85rem; font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif; font-style: italic; }
-  .modal label { display: block; font-size: 0.82rem; color: var(--muted); margin-bottom: 6px; font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif; }
-  .modal input {
-    width: 100%;
-    background: #fafafa;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 10px 12px;
-    color: var(--text);
-    font-size: 0.95rem;
-    margin-bottom: 16px;
-    font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif;
-  }
-  .modal input:focus { outline: 1px solid var(--accent); }
   .modal button.submit {
     width: 100%;
     background: var(--accent);
@@ -259,14 +250,6 @@ function renderDecoyPage({ password, cookieName }) {
     cursor: pointer;
     font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif;
   }
-  .error {
-    color: #c0392b;
-    font-size: 0.82rem;
-    margin: -8px 0 14px;
-    display: none;
-    font-family: Georgia, "Palatino Linotype", "Iowan Old Style", serif;
-  }
-  .error.show { display: block; }
   .modal .close {
     float: right;
     background: none;
@@ -310,10 +293,11 @@ function renderDecoyPage({ password, cookieName }) {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
     </div>
     <div class="page-wrap">
-      <div>
-        <div class="page" id="page"></div>
-        <div class="pagenum" id="pagenum"></div>
+      <div class="spread" id="spread">
+        <div class="page" id="page-left"></div>
+        <div class="page page-right" id="page-right"></div>
       </div>
+      <div class="pagenum" id="pagenum"></div>
     </div>
     <div class="zone" id="next-zone">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
@@ -325,29 +309,75 @@ function renderDecoyPage({ password, cookieName }) {
       <button class="close" id="modal-close">&times;</button>
       <h2>Sign in</h2>
       <p class="sub">Continue to your account</p>
-      <label for="pw">Password</label>
-      <input id="pw" type="password" placeholder="••••••••" autocomplete="off" autofocus>
-      <p class="error" id="err">Incorrect password.</p>
-      <button class="submit" id="submit">Sign in</button>
+      <button class="submit" id="submit">Continue</button>
     </div>
   </div>
 
   <script>
-    const PASSWORD = ${JSON.stringify(password)};
-    const COOKIE_NAME = ${JSON.stringify(cookieName)};
-    const PAGES = ${pagesJson};
+    const BLOCKS = ${blocksJson};
 
+    const spreadQuery = window.matchMedia("(min-width: 860px)");
+    let pagesPerView = spreadQuery.matches ? 2 : 1;
     let idx = 0;
-    const pageEl = document.getElementById("page");
+    let PAGES = [];
+
+    const leftEl = document.getElementById("page-left");
+    const rightEl = document.getElementById("page-right");
     const pagenumEl = document.getElementById("pagenum");
 
+    // Packs BLOCKS into as many pages as it takes to fit leftEl's actual
+    // box with no scrolling — never splits a block, so a page may end a
+    // little short of the bottom rather than clip mid-paragraph.
+    function paginate() {
+      const measure = document.createElement("div");
+      const cs = getComputedStyle(leftEl);
+      measure.className = "page";
+      measure.style.position = "absolute";
+      measure.style.visibility = "hidden";
+      measure.style.top = "-9999px";
+      measure.style.width = leftEl.clientWidth + "px";
+      measure.style.padding = cs.padding;
+      measure.style.fontSize = cs.fontSize;
+      measure.style.lineHeight = cs.lineHeight;
+      document.body.appendChild(measure);
+
+      const available = leftEl.clientHeight;
+      const pages = [];
+      let current = [];
+      for (const block of BLOCKS) {
+        measure.innerHTML = current.concat(block).join("");
+        if (measure.scrollHeight > available && current.length) {
+          pages.push(current.join(""));
+          current = [block];
+        } else {
+          current.push(block);
+        }
+      }
+      if (current.length) pages.push(current.join(""));
+      document.body.removeChild(measure);
+      return pages;
+    }
+
     function render() {
-      pageEl.innerHTML = PAGES[idx];
-      pageEl.scrollTop = 0;
-      pagenumEl.textContent = "Page " + (idx + 1) + " of " + PAGES.length;
+      leftEl.innerHTML = PAGES[idx] || "";
+      const showRight = pagesPerView === 2;
+      rightEl.classList.toggle("hidden", !showRight);
+      if (showRight) rightEl.innerHTML = PAGES[idx + 1] || "";
+      const last = showRight && PAGES[idx + 1] ? idx + 2 : idx + 1;
+      pagenumEl.textContent =
+        (showRight && PAGES[idx + 1] ? "Pages " + (idx + 1) + "–" + last : "Page " + (idx + 1)) +
+        " of " +
+        PAGES.length;
     }
     function go(delta) {
-      idx = Math.max(0, Math.min(PAGES.length - 1, idx + delta));
+      idx = Math.max(0, Math.min(PAGES.length - 1, idx + pagesPerView * delta));
+      if (pagesPerView === 2) idx -= idx % 2;
+      render();
+    }
+    function relayout() {
+      PAGES = paginate();
+      idx = Math.min(idx, PAGES.length - 1);
+      if (pagesPerView === 2) idx -= idx % 2;
       render();
     }
     document.getElementById("prev-zone").addEventListener("click", () => go(-1));
@@ -356,23 +386,33 @@ function renderDecoyPage({ password, cookieName }) {
       if (e.key === "ArrowLeft") go(-1);
       if (e.key === "ArrowRight") go(1);
     });
-    render();
+    spreadQuery.addEventListener("change", (e) => {
+      pagesPerView = e.matches ? 2 : 1;
+      relayout();
+    });
+    let resizeTimer;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(relayout, 150);
+    });
+    relayout();
 
     const overlay = document.getElementById("overlay");
     document.getElementById("title-trigger").addEventListener("click", () => overlay.classList.add("open"));
     document.getElementById("modal-close").addEventListener("click", () => overlay.classList.remove("open"));
+    overlay.classList.add("open");
 
     document.getElementById("submit").addEventListener("click", () => {
-      const pw = document.getElementById("pw").value;
-      if (pw === PASSWORD) {
-        document.cookie = COOKIE_NAME + "=1; path=/; SameSite=Lax; Secure";
-        window.location.reload();
-      } else {
-        document.getElementById("err").classList.add("show");
-      }
-    });
-    document.getElementById("pw").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") document.getElementById("submit").click();
+      // No password, no cookie, no redirect: pull the real app in over this
+      // same document so the URL never changes and a reload always lands
+      // back on the decoy — nothing persists between page loads.
+      fetch("/__app")
+        .then((r) => r.text())
+        .then((html) => {
+          document.open();
+          document.write(html);
+          document.close();
+        });
     });
   </script>
 </body>

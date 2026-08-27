@@ -1,6 +1,8 @@
 import "./env.js";
 
+import { createRequire } from "node:module";
 import { createServer } from "node:http";
+import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -12,25 +14,34 @@ import { libcurlPath } from "@mercuryworkshop/libcurl-transport";
 import { scramjetPath } from "@mercuryworkshop/scramjet/path";
 import { uvPath } from "@titaniumnetwork-dev/ultraviolet";
 
+import { aiEnabled, handleAiChat, handleAiStatus } from "./ai.js";
 import authRouter, { serveAvatar, serveMessageImage } from "./auth.js";
 import { handleChatUpgrade } from "./chat.js";
-import { createDecoyApp } from "./decoy.js";
+import { renderDecoyPage } from "./decoy.js";
 import { evaluateDomain } from "./domainGate.js";
 import { sweepOldMessages } from "./retention.js";
 
 const distPath = fileURLToPath(new URL("../dist/", import.meta.url));
 
+// None of these three ship a "./path"-style export (scramjet-controller has
+// none at all; the v3/v2-era transport packages only expose one in a CJS
+// subpath their "exports" map doesn't wire up), so resolve their package
+// root from the main entry point instead, same trick as the "./path"
+// exports do internally.
+const require = createRequire(import.meta.url);
+const distDirOf = (pkg) => dirname(require.resolve(pkg));
+const scramjetControllerPath = distDirOf("@mercuryworkshop/scramjet-controller");
+const epoxy3Path = distDirOf("@mercuryworkshop/epoxy-transport-3");
+const libcurl2Path = distDirOf("@mercuryworkshop/libcurl-transport-2");
+
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.argv[2] || process.env.PORT) || 5000;
-// Off by default: any domain forwarded to this port gets a fake "learn to
-// code" site instead of arsenic, with a hero-button login modal that
-// redirects to the real app on the correct password. Wildcard by
-// construction — it doesn't look at the Host header at all.
-const decoyPort = process.env.ARSENIC_DECOY_PORT ? Number(process.env.ARSENIC_DECOY_PORT) : null;
-if (decoyPort && !process.env.ARSENIC_DECOY_PASSWORD) {
-  console.error("ARSENIC_DECOY_PASSWORD must be set when ARSENIC_DECOY_PORT is used");
-  process.exit(1);
-}
+// Off by default: with this set, "/" serves a fake "learn to code" site
+// instead of arsenic, with a "Sign in to continue" popup that opens on
+// load. Clicking Continue pulls the real app in over the same document
+// (see decoy.js) rather than via redirect, so the URL never changes and
+// nothing persists across a reload — every reload lands back on the decoy.
+const decoyEnabled = process.env.ARSENIC_DECOY_ENABLED === "true";
 // Off by default: an open-source clone only gets a working chatroom when its
 // own operator deliberately opts in, not just by having the code.
 const chatEnabled = process.env.ARSENIC_CHAT_ENABLED === "true";
@@ -77,11 +88,34 @@ if (chatEnabled) {
   );
 }
 
+// No login gate (unlike chat) — the sidebar hides the icon entirely when
+// this is off, so /ai/status just needs to exist unconditionally for it to
+// find out. The chat route only exists when enabled.
+app.get("/ai/status", handleAiStatus);
+if (aiEnabled) {
+  app.post("/ai/chat", express.json({ limit: "64kb" }), handleAiChat);
+}
+
 app.use("/scram/", express.static(scramjetPath));
+app.use("/controller/", express.static(scramjetControllerPath));
 app.use("/uv/", express.static(uvPath));
 app.use("/baremux/", express.static(baremuxPath));
+// Ultraviolet still goes through bare-mux, which only speaks these
+// packages' 2.x/1.x-era transport interface (see AGENTS.md); Scramjet's
+// controller needs the interface these packages moved to at 3.x/2.x, which
+// bare-mux can't carry. Two major versions of the same package, so they're
+// installed under aliases and served at separate paths.
 app.use("/epoxy/", express.static(epoxyPath));
 app.use("/libcurl/", express.static(libcurlPath));
+app.use("/epoxy3/", express.static(epoxy3Path));
+app.use("/libcurl2/", express.static(libcurl2Path));
+
+// Decoy is a production-only, opt-in concern; dev keeps serving the real
+// app at "/" via Vite regardless of this env var.
+if (decoyEnabled && !dev) {
+  app.get("/", (req, res) => res.type("html").send(renderDecoyPage()));
+  app.get("/__app", (req, res) => res.sendFile(`${distPath}index.html`));
+}
 
 if (dev) {
   const { createServer: createViteServer } = await import("vite");
@@ -126,11 +160,3 @@ sweepOldMessages();
 setInterval(sweepOldMessages, 30 * 60 * 1000);
 
 server.listen({ port });
-
-if (decoyPort) {
-  const decoyApp = createDecoyApp({
-    password: process.env.ARSENIC_DECOY_PASSWORD,
-    cookieName: process.env.ARSENIC_DECOY_COOKIE || "reader_session",
-  });
-  decoyApp.listen(decoyPort, () => console.log(`Decoy listening on http://localhost:${decoyPort}`));
-}

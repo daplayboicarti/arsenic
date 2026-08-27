@@ -36,17 +36,22 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS dm_messages (
+  CREATE TABLE IF NOT EXISTS warnings (
     id INTEGER PRIMARY KEY,
-    from_user_id INTEGER NOT NULL REFERENCES users(id),
-    to_user_id INTEGER NOT NULL REFERENCES users(id),
-    body TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    reason TEXT NOT NULL,
+    issued_by TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
 
   CREATE INDEX IF NOT EXISTS messages_created_at ON messages(created_at);
-  CREATE INDEX IF NOT EXISTS dm_messages_created_at ON dm_messages(created_at);
+  CREATE INDEX IF NOT EXISTS warnings_user_id ON warnings(user_id);
 `);
+
+// DMs were removed (community-only chat, plus this data was never really
+// private — self-hosted and fully readable server-side). Drop the table
+// outright rather than leaving dead rows behind.
+db.exec("DROP TABLE IF EXISTS dm_messages");
 
 // Migration-safe boot init: add columns that a v1 install won't have yet.
 // No migrations table — just idempotent checks against the live schema.
@@ -59,6 +64,8 @@ if (!userColumns.has("avatar_path")) db.exec("ALTER TABLE users ADD COLUMN avata
 if (!userColumns.has("avatar_mime")) db.exec("ALTER TABLE users ADD COLUMN avatar_mime TEXT");
 if (!userColumns.has("avatar_updated_at")) db.exec("ALTER TABLE users ADD COLUMN avatar_updated_at INTEGER");
 if (!userColumns.has("banned_at")) db.exec("ALTER TABLE users ADD COLUMN banned_at INTEGER");
+if (!userColumns.has("bio")) db.exec("ALTER TABLE users ADD COLUMN bio TEXT");
+if (!userColumns.has("timeout_until")) db.exec("ALTER TABLE users ADD COLUMN timeout_until INTEGER");
 
 const messageColumns = columnNames("messages");
 if (!messageColumns.has("channel_id")) {
@@ -148,50 +155,23 @@ const getAvatarStmt = db.prepare(
   "SELECT avatar_path AS path, avatar_mime AS mime, avatar_updated_at AS updatedAt FROM users WHERE id = ?",
 );
 const isBannedStmt = db.prepare("SELECT banned_at FROM users WHERE id = ?");
+const setTimeoutStmt = db.prepare("UPDATE users SET timeout_until = ? WHERE id = ?");
+const getTimeoutStmt = db.prepare("SELECT timeout_until AS timeoutUntil FROM users WHERE id = ?");
 const listBannedStmt = db.prepare("SELECT username FROM users WHERE banned_at IS NOT NULL ORDER BY banned_at DESC");
-
-const insertDmStmt = db.prepare(
-  "INSERT INTO dm_messages (from_user_id, to_user_id, body, created_at) VALUES (?, ?, ?, ?)",
+const listUsersStmt = db.prepare(`
+  SELECT users.id, users.username, users.avatar_mime AS avatarMime, users.avatar_updated_at AS avatarUpdatedAt
+  FROM users
+  WHERE users.banned_at IS NULL
+  ORDER BY users.username COLLATE NOCASE
+`);
+const setBioStmt = db.prepare("UPDATE users SET bio = ? WHERE id = ?");
+const addWarningStmt = db.prepare(
+  "INSERT INTO warnings (user_id, reason, issued_by, created_at) VALUES (?, ?, ?, ?)",
 );
-const dmHistoryStmt = db.prepare(`
-  SELECT dm_messages.id, dm_messages.body, dm_messages.created_at AS createdAt,
-         dm_messages.from_user_id AS fromUserId, dm_messages.to_user_id AS toUserId,
-         fromUser.username AS fromUsername, toUser.username AS toUsername,
-         fromUser.avatar_mime AS fromAvatarMime, fromUser.avatar_updated_at AS fromAvatarUpdatedAt
-  FROM dm_messages
-  JOIN users AS fromUser ON fromUser.id = dm_messages.from_user_id
-  JOIN users AS toUser ON toUser.id = dm_messages.to_user_id
-  WHERE ((dm_messages.from_user_id = ? AND dm_messages.to_user_id = ?)
-      OR (dm_messages.from_user_id = ? AND dm_messages.to_user_id = ?))
-    AND fromUser.banned_at IS NULL AND toUser.banned_at IS NULL
-  ORDER BY dm_messages.created_at DESC
-  LIMIT ?
-`);
-const olderDmHistoryStmt = db.prepare(`
-  SELECT dm_messages.id, dm_messages.body, dm_messages.created_at AS createdAt,
-         dm_messages.from_user_id AS fromUserId, dm_messages.to_user_id AS toUserId,
-         fromUser.username AS fromUsername, toUser.username AS toUsername,
-         fromUser.avatar_mime AS fromAvatarMime, fromUser.avatar_updated_at AS fromAvatarUpdatedAt
-  FROM dm_messages
-  JOIN users AS fromUser ON fromUser.id = dm_messages.from_user_id
-  JOIN users AS toUser ON toUser.id = dm_messages.to_user_id
-  WHERE ((dm_messages.from_user_id = ? AND dm_messages.to_user_id = ?)
-      OR (dm_messages.from_user_id = ? AND dm_messages.to_user_id = ?))
-    AND dm_messages.id < ?
-    AND fromUser.banned_at IS NULL AND toUser.banned_at IS NULL
-  ORDER BY dm_messages.created_at DESC
-  LIMIT ?
-`);
-const dmPartnersStmt = db.prepare(`
-  SELECT DISTINCT users.username
-  FROM dm_messages
-  JOIN users ON users.id = CASE
-    WHEN dm_messages.from_user_id = @uid THEN dm_messages.to_user_id
-    ELSE dm_messages.from_user_id
-  END
-  WHERE (dm_messages.from_user_id = @uid OR dm_messages.to_user_id = @uid)
-    AND users.banned_at IS NULL
-`);
+const listWarningsStmt = db.prepare(
+  "SELECT id, reason, issued_by AS issuedBy, created_at AS createdAt FROM warnings WHERE user_id = ? ORDER BY created_at DESC",
+);
+const warningCountStmt = db.prepare("SELECT COUNT(*) AS n FROM warnings WHERE user_id = ?");
 
 export function getUserByUsername(username) {
   return getUserByUsernameStmt.get(username);
@@ -327,24 +307,35 @@ export function isUserBanned(userId) {
   return !!isBannedStmt.get(userId)?.banned_at;
 }
 
+export function setUserTimeout(userId, until) {
+  setTimeoutStmt.run(until, userId);
+}
+
+export function timeoutUntil(userId) {
+  const value = getTimeoutStmt.get(userId)?.timeoutUntil ?? null;
+  return value && value > Date.now() ? value : null;
+}
+
+export function setBio(userId, bio) {
+  setBioStmt.run(bio, userId);
+}
+
+export function addWarning(userId, reason, issuedBy) {
+  addWarningStmt.run(userId, reason, issuedBy, Date.now());
+}
+
+export function listWarnings(userId) {
+  return listWarningsStmt.all(userId);
+}
+
+export function warningCount(userId) {
+  return warningCountStmt.get(userId).n;
+}
+
 export function listBannedUsers() {
   return listBannedStmt.all().map((row) => row.username);
 }
 
-export function insertDm({ fromUserId, toUserId, body }) {
-  const createdAt = Date.now();
-  const { lastInsertRowid } = insertDmStmt.run(fromUserId, toUserId, body, createdAt);
-  return { id: lastInsertRowid, createdAt };
-}
-
-export function dmHistory(uidA, uidB, limit = 50) {
-  return dmHistoryStmt.all(uidA, uidB, uidB, uidA, limit).reverse();
-}
-
-export function olderDmHistory(uidA, uidB, beforeId, limit = 50) {
-  return olderDmHistoryStmt.all(uidA, uidB, uidB, uidA, beforeId, limit).reverse();
-}
-
-export function dmPartners(userId) {
-  return dmPartnersStmt.all({ uid: userId }).map((row) => row.username);
+export function listUsers() {
+  return listUsersStmt.all();
 }
