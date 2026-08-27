@@ -325,6 +325,61 @@
   document.open();
   document.write(html);
   document.close();
-}, 600);</script>
+  showUpdateBannerIfNeeded();
+}, 600);
+
+// Not part of the spliced app bundle above (build-static.mjs only ever
+// swaps the `var b = "...";` line), so this survives every re-splice.
+// Only fires on a CDN /gh/<owner>/<repo>@<ref>/... URL pinned to something
+// other than "main" - see AGENTS.md's "Always pin ... never @main" note for
+// why the pinned build itself must stay SHA-pinned even though this exists.
+function showUpdateBannerIfNeeded() {
+  try {
+    var m = location.pathname.match(/\/gh\/([^/]+)\/([^/@]+)@([^/]+)\//);
+    if (!m || m[3] === "main") return;
+    var owner = m[1], repo = m[2], ref = m[3];
+
+    // GitHub's own API, not jsDelivr/esm.sh - those cache @main aggressively
+    // enough to make this check itself unreliably stale (see AGENTS.md).
+    fetch("https://api.github.com/repos/" + owner + "/" + repo + "/commits/main")
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.sha || d.sha.indexOf(ref) === 0) return;
+        if (localStorage.getItem("arsenic:updateDismissed") === d.sha) return;
+
+        var bar = document.createElement("div");
+        bar.style.cssText =
+          "position:fixed;bottom:0;left:0;right:0;z-index:2147483647;display:flex;" +
+          "align-items:center;justify-content:center;gap:12px;padding:10px 16px;" +
+          "background:#1e1e2e;color:#cdd6f4;font:13px -apple-system,BlinkMacSystemFont,sans-serif;" +
+          "border-top:1px solid #313244;";
+
+        var text = document.createElement("span");
+        text.textContent = "A newer version is available.";
+
+        var link = document.createElement("a");
+        link.textContent = "Update";
+        link.href = location.pathname.replace("@" + ref + "/", "@main/") + location.search;
+        link.style.cssText = "color:#89b4fa;text-decoration:underline;";
+
+        var dismiss = document.createElement("button");
+        dismiss.textContent = "×";
+        dismiss.setAttribute("aria-label", "Dismiss");
+        dismiss.style.cssText =
+          "background:none;border:none;color:#6c7086;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;";
+        dismiss.onclick = function () {
+          bar.remove();
+          try {
+            localStorage.setItem("arsenic:updateDismissed", d.sha);
+          } catch (e) {}
+        };
+
+        bar.append(text, link, dismiss);
+        document.body.appendChild(bar);
+      })
+      .catch(function () {});
+  } catch (e) {}
+}
+</script>
 </body>
 </html>
