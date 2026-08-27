@@ -1,2 +1,0 @@
-export const RETENTION_MS = 72 * 60 * 60 * 1000;
-export const RETENTION_CHANNEL_THRESHOLD = 100;
