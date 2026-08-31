@@ -1,22 +1,51 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Launcher for the single-file build: opening this URL (it looks like an
-  image) iframe-loads the real app without the address bar ever changing.
-  Keep it next to arsenic.html.
--->
-<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" style="position:absolute;top:0;left:0;overflow:hidden;" onload="launch()">
-  <script type="text/javascript"><![CDATA[
-    function launch() {
-      var c = document.getElementById("lc");
-      if (!c) return;
-      var f = document.createElementNS("http://www.w3.org/1999/xhtml", "iframe");
-      // Forward ?embed= (and anything else) to the app.
-      f.setAttribute("src", "./arsenic.html" + (location.search || ""));
-      f.style.cssText = "width:100%;height:100%;border:none;background:white;margin:0;padding:0;";
-      c.appendChild(f);
-    }
-  ]]></script>
-  <foreignObject x="0" y="0" width="100%" height="100%">
-    <xhtml:div xmlns:xhtml="http://www.w3.org/1999/xhtml" id="lc" style="width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:white;"></xhtml:div>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+  <foreignObject width="100%" height="100%">
+    <html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+      <head>
+        <script>/*<![CDATA[*/(function(){
+  var XHTML_NS="http://www.w3.org/1999/xhtml";
+  var root=document.querySelector("foreignObject").firstElementChild;
+  var origCE=document.createElement.bind(document);
+  var origCENS=document.createElementNS.bind(document);
+  Object.defineProperty(document,"head",{get:function(){return root.querySelector("head")},configurable:true});
+  Object.defineProperty(document,"body",{get:function(){return root.querySelector("body")},configurable:true});
+  Object.defineProperty(document,"documentElement",{get:function(){return root},configurable:true});
+  document.createElement=function(t,o){return typeof t==="string"?origCENS(XHTML_NS,t,o):origCE(t,o)};
+  document.createElementNS=function(ns,n,o){return (ns==null||ns===XHTML_NS)?origCENS(XHTML_NS,n,o):origCENS(ns,n,o)};
+  Object.defineProperty(document,"getElementById",{value:function(id){return root.querySelector('[id="'+String(id).replace(/["\\]/g,'\\$&')+'"]')},configurable:true,writable:true});
+  document.getElementsByTagName=function(t){return root.getElementsByTagNameNS(XHTML_NS,t)};
+  document.getElementsByTagNameNS=function(ns,t){return root.getElementsByTagNameNS(ns,t)};
+  document.getElementsByClassName=function(c){return root.getElementsByClassName(c)};
+  var origQS=document.querySelector.bind(document);
+  var origQSA=document.querySelectorAll.bind(document);
+  document.querySelector=function(s){try{return root.querySelector(s)||origQS(s)}catch(e){return origQS(s)}};
+  document.querySelectorAll=function(s){try{var a=root.querySelectorAll(s);return a.length?a:origQSA(s)}catch(e){return origQSA(s)}};
+})();/*]]>*/</script>
+        <style><![CDATA[html,body{margin:0;width:100%;height:100%;overflow:hidden}foreignObject{overflow:visible}]]></style>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/png" href="./favicon.png" />
+    <meta name="description" content="A browser-like web proxy built with Svelte and Node.js." />
+    <meta property="og:title" content="arsenic" />
+    <meta property="og:description" content="A browser-like web proxy built with Svelte and Node.js." />
+    <meta property="og:image" content="./favicon.png" />
+    <title>arsenic</title>
+    <script async="async" src="https://www.googletagmanager.com/gtag/js?id=G-V45JNZYC0T" crossorigin="anonymous"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag() { dataLayer.push(arguments); }
+      gtag("js", new Date());
+      gtag("config", "G-V45JNZYC0T");
+    </script>
+    
+  
+      </head>
+      <body>
+
+<script crossorigin="crossorigin" src="./assets/index-DxZyuczn.js"></script>
+
+      </body>
+    </html>
   </foreignObject>
 </svg>
