@@ -10,7 +10,6 @@
   Object.defineProperty(document,"head",{get:function(){return root.querySelector("head")},configurable:true});
   Object.defineProperty(document,"body",{get:function(){return root.querySelector("body")},configurable:true});
   Object.defineProperty(document,"documentElement",{get:function(){return root},configurable:true});
-  document.createElement=function(t,o){return typeof t==="string"?origCENS(XHTML_NS,t,o):origCE(t,o)};
   document.createElementNS=function(ns,n,o){return (ns==null||ns===XHTML_NS)?origCENS(XHTML_NS,n,o):origCENS(ns,n,o)};
   Object.defineProperty(document,"getElementById",{value:function(id){return root.querySelector('[id="'+String(id).replace(/["\\]/g,'\\$&')+'"]')},configurable:true,writable:true});
   document.getElementsByTagName=function(t){return root.getElementsByTagNameNS(XHTML_NS,t)};
@@ -20,6 +19,30 @@
   var origQSA=document.querySelectorAll.bind(document);
   document.querySelector=function(s){try{return root.querySelector(s)||origQS(s)}catch(e){return origQS(s)}};
   document.querySelectorAll=function(s){try{var a=root.querySelectorAll(s);return a.length?a:origQSA(s)}catch(e){return origQSA(s)}};
+  /* Svelte's static-template instantiation (create_fragment_from_html in its
+     internals) builds elements via document.createElement("template").innerHTML
+     = "<svg>...</svg>". In a normal HTML document that's fine — the HTML
+     fragment parser special-cases a bare <svg> tag and gives it the SVG
+     namespace automatically. This document is XML-parsed (a directly-loaded
+     .svg always is), and XML fragment parsing has no such special-casing: an
+     <svg> tag with no explicit xmlns just inherits the ambient XHTML
+     namespace from its <template> parent, silently producing a non-rendering
+     "svg" element (confirmed: Lucide icons' <path> children end up correctly
+     SVG-namespaced via a separate createElementNS call, but the <svg> root
+     around them doesn't, so nothing paints — a plain-string xmlns="..." fix
+     doesn't help either: fragment parsing under XML rules doesn't treat an
+     attribute string as a live namespace declaration the way full-document
+     XML parsing does). Routing "template" specifically to a real, separate
+     HTML document (created via createHTMLDocument, genuinely HTML-parsed
+     regardless of what the top-level document is) makes its .innerHTML use
+     actual HTML fragment parsing, matching what Svelte assumes — nodes
+     later move into this document via normal DOM insertion, which adopts
+     cross-document nodes automatically. */
+  var auxDoc=document.implementation.createHTMLDocument("");
+  document.createElement=function(t,o){
+    if(typeof t==="string"&&t.toLowerCase()==="template")return auxDoc.createElement("template");
+    return typeof t==="string"?origCENS(XHTML_NS,t,o):origCE(t,o);
+  };
 })();/*]]>*/</script>
         <style><![CDATA[html,body{margin:0;width:100%;height:100%;overflow:hidden}foreignObject{overflow:visible}]]></style>
 
@@ -43,7 +66,7 @@
       </head>
       <body>
 
-<script crossorigin="crossorigin" src="./assets/index-DxZyuczn.js"></script>
+<script crossorigin="crossorigin" src="./assets/index-CVu4b-xB.js"></script>
 
       </body>
     </html>
